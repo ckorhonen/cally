@@ -1,4 +1,4 @@
-import { useState, useEvent, useHost, useEffect, useMemo } from "atomico";
+import { useState, useEvent, useHost, useMemo } from "atomico";
 import { PlainDate, PlainYearMonth } from "../utils/temporal.js";
 import { useDateProp, useDateFormatter } from "../utils/hooks.js";
 import { clamp, toDate, getToday } from "../utils/date.js";
@@ -50,61 +50,74 @@ function usePagination({
   goto,
 }: UsePaginationOptions) {
   const step = pageBy === "single" ? 1 : months;
-  const [page, setPage] = useState(() =>
-    createPage(focusedDate.toPlainYearMonth(), months)
-  );
 
-  const updatePageBy = (by: number) =>
-    setPage(createPage(page.start.add({ months: by }), months));
+  // Track page start position as state, derive page from it
+  const [pageStart, setPageStart] = useState(() =>
+    focusedDate.toPlainYearMonth()
+  );
+  const page = useMemo(() => createPage(pageStart, months), [pageStart, months]);
 
   const contains = (date: PlainDate) => {
-    const diff = diffInMonths(page.start, date.toPlainYearMonth());
+    const diff = diffInMonths(pageStart, date.toPlainYearMonth());
     return diff >= 0 && diff < months;
   };
 
-  // page change -> clamp focused date to visible range
-  useEffect(() => {
-    const focusedMonth = focusedDate.toPlainYearMonth();
+  function clampToPage(date: PlainDate, pageStart: PlainYearMonth, pageEnd: PlainYearMonth): PlainDate {
+    const focusedMonth = date.toPlainYearMonth();
+    const startDiff = diffInMonths(focusedMonth, pageStart);
+    const endDiff = diffInMonths(focusedMonth, pageEnd);
 
-    // Clamp the focused month to the page range
-    let clampedMonth = focusedMonth;
-    const startDiff = diffInMonths(focusedMonth, page.start);
-    const endDiff = diffInMonths(focusedMonth, page.end);
-
+    // Clamp to page range
     if (startDiff > 0) {
-      clampedMonth = page.start;
+      return date.add({ months: startDiff });
     } else if (endDiff < 0) {
-      clampedMonth = page.end;
+      return date.add({ months: endDiff });
     }
+    return date;
+  }
 
-    // If clamping changed the month, update the focused date
-    if (!focusedMonth.equals(clampedMonth)) {
-      const monthsToAdd = diffInMonths(focusedMonth, clampedMonth);
-      goto(focusedDate.add({ months: monthsToAdd }));
+  function updatePageBy(by: number) {
+    const newPageStart = pageStart.add({ months: by });
+    const newPage = createPage(newPageStart, months);
+    setPageStart(newPageStart);
+
+    // Clamp focused date to new page range
+    const clampedDate = clampToPage(focusedDate, newPage.start, newPage.end);
+    if (!focusedDate.equals(clampedDate)) {
+      goto(clampedDate);
     }
-  }, [page]);
+  }
 
-  // focused date change -> update page
-  useEffect(() => {
-    if (contains(focusedDate)) {
+  // Wrap goto to also update page synchronously when focused date changes
+  function gotoAndUpdatePage(date: PlainDate) {
+    const focusedMonth = date.toPlainYearMonth();
+    const diff = diffInMonths(pageStart, focusedMonth);
+
+    // Update focused date first
+    goto(date);
+
+    // If new focused date is in current page, nothing more to do
+    if (diff >= 0 && diff < months) {
       return;
     }
 
-    const diff = diffInMonths(page.start, focusedDate.toPlainYearMonth());
-
-    // if we only move one month either way, move by step
+    // Compute new page start position to show the focused date
+    let newPageStart: PlainYearMonth;
     if (diff === -1) {
-      updatePageBy(-step);
+      newPageStart = pageStart.add({ months: -step });
     } else if (diff === months) {
-      updatePageBy(step);
+      newPageStart = pageStart.add({ months: step });
     } else {
-      // anything else, move in steps of months
-      updatePageBy(Math.floor(diff / months) * months);
+      // Jump to focused date by moving in multiples of months
+      newPageStart = pageStart.add({ months: Math.floor(diff / months) * months });
     }
-  }, [focusedDate, step, months]);
+
+    setPageStart(newPageStart);
+  }
 
   return {
     page,
+    goto: gotoAndUpdatePage,
     previous: !min || !contains(min) ? () => updatePageBy(-step) : undefined,
     next: !max || !contains(max) ? () => updatePageBy(step) : undefined,
   };
@@ -128,18 +141,18 @@ export function useCalendarBase({
     [focusedDateProp, today, min, max]
   );
 
-  function goto(date: PlainDate) {
+  function gotoInternal(date: PlainDate) {
     setFocusedDate(date);
     dispatchFocusDay(toDate(date));
   }
 
-  const { next, previous, page } = usePagination({
+  const { next, previous, page, goto } = usePagination({
     pageBy,
     focusedDate,
     months,
     min,
     max,
-    goto,
+    goto: gotoInternal,
   });
 
   const host = useHost();
